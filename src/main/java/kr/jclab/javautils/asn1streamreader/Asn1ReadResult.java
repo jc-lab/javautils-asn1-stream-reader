@@ -1,5 +1,7 @@
 package kr.jclab.javautils.asn1streamreader;
 
+import java.util.Arrays;
+
 public class Asn1ReadResult {
     public enum ReadType {
         CLOSE,
@@ -29,5 +31,14 @@ public class Asn1ReadResult {
 
     public Object getObject() {
         return object;
+    }
+
+    @Override
+    public String toString() {
+        return "Asn1ReadResult{" +
+                "rawBuffer=" + Arrays.toString(rawBuffer) +
+                ", readType=" + readType +
+                ", object=" + object +
+                '}';
     }
 }

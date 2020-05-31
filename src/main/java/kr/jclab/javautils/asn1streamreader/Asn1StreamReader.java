@@ -18,12 +18,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Asn1StreamReader extends FilterInputStream {
-    private Asn1ReaderOptions options;
+    private final Asn1ReaderOptions options;
     private Thread readThread = null;
-    private AtomicBoolean readThreadRun = new AtomicBoolean();
+    private final AtomicBoolean readThreadRun = new AtomicBoolean();
 
-    private boolean readingUsingCallback;
-    private LinkedBlockingQueue<Asn1ReadResult> queue = new LinkedBlockingQueue<>();
+    private final boolean readingUsingCallback;
+    private final LinkedBlockingQueue<Asn1ReadResult> queue = new LinkedBlockingQueue<>();
 
     private boolean eof = false;
     private IOException lastException = null;
@@ -49,7 +49,36 @@ public class Asn1StreamReader extends FilterInputStream {
         if (in instanceof CallbackInputStream) {
             // Case-1
             this.readingUsingCallback = true;
-            ((CallbackInputStream)in).setCallbacks(this.inputCallbacks);
+            CallbackInputStream.Callbacks inputCallbacks = new CallbackInputStream.Callbacks() {
+                @Override
+                public void onData(ByteBuffer buffer) {
+                    ByteBufferReadBuffer readBuffer = new ByteBufferReadBuffer(buffer);
+                    try {
+                        while (readBuffer.available() > 0) {
+                            List<Asn1ReadResult> readResults = Asn1StreamReader.this.onData(readBuffer);
+                            if (options.getReadCallback() != null) {
+                                for (Asn1ReadResult item : readResults) {
+                                    options.getReadCallback().onData(item);
+                                }
+                            } else {
+                                queue.addAll(readResults);
+                            }
+
+                        }
+                    } catch (IOException e) {
+                        if (e instanceof EOFException) {
+                            setEof();
+                        }
+                        e.printStackTrace();
+                    }
+                }
+
+                @Override
+                public void onClose() {
+                    setEof();
+                }
+            };
+            ((CallbackInputStream)in).setCallbacks(inputCallbacks);
         }else{
             // Case-2/3
             this.readingUsingCallback = false;
@@ -174,36 +203,6 @@ public class Asn1StreamReader extends FilterInputStream {
         }
         this.in.close();
     }
-
-    private final CallbackInputStream.Callbacks inputCallbacks = new CallbackInputStream.Callbacks() {
-        @Override
-        public void onData(ByteBuffer buffer) {
-            ByteBufferReadBuffer readBuffer = new ByteBufferReadBuffer(buffer);
-            try {
-                while (readBuffer.available() > 0) {
-                    List<Asn1ReadResult> readResults = Asn1StreamReader.this.onData(readBuffer);
-                    if (options.getReadCallback() != null) {
-                        for(Asn1ReadResult item : readResults) {
-                            options.getReadCallback().onData(item);
-                        }
-                    } else {
-                        queue.addAll(readResults);
-                    }
-
-                }
-            } catch(IOException e) {
-                if(e instanceof EOFException) {
-                    setEof();
-                }
-                e.printStackTrace();
-            }
-        }
-
-        @Override
-        public void onClose() {
-            setEof();
-        }
-    };
 
     private final LinkedList<ParseContext> parseContextStack = new LinkedList<>();
 
