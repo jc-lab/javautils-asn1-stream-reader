@@ -10,6 +10,7 @@ import org.bouncycastle.asn1.ASN1Primitive;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -90,7 +91,7 @@ public class Asn1StreamReader extends FilterInputStream {
     }
 
     private void setEof() {
-        Asn1ReadResult eofResult = new Asn1ReadResult(Asn1ReadResult.ReadType.EOF, null);
+        Asn1ReadResult eofResult = new Asn1ReadResult(null, Asn1ReadResult.ReadType.EOF, null);
         this.eof = true;
         if(this.options.getReadCallback() != null) {
             this.options.getReadCallback().onData(eofResult);
@@ -274,7 +275,7 @@ public class Asn1StreamReader extends FilterInputStream {
                             getTagBuffer(parseContext).add(buf);
 
                             if (parseContext.tagNumber == 0 && len == 0) {
-                                readResults.addAll(tagReadDone(parseContext));
+                                readResults.addAll(tagReadDone(parseContext, null));
                                 break;
                             }
 
@@ -342,13 +343,13 @@ public class Asn1StreamReader extends FilterInputStream {
                             readBuffer.readBufferTo(getTagBuffer(parseContext), avail);
                             parseContext.tagWrittenLength += avail;
                             if (parseContext.tagWrittenLength == parseContext.tagLength) {
-                                readResults.addAll(this.tagReadDone(parseContext));
+                                readResults.addAll(this.tagReadDone(parseContext, null));
                             }
                         }
                         break;
 
                     case READ_TAG_CONTENT_DONE:
-                        readResults.addAll(this.tagReadDone(parseContext));
+                        readResults.addAll(this.tagReadDone(parseContext, null));
                         break;
                 }
             } catch (InterruptedException e) {
@@ -358,9 +359,21 @@ public class Asn1StreamReader extends FilterInputStream {
         return readResults;
     }
 
+    public static byte[] toByteArray(Collection<? extends Number> collection) {
+        Object[] boxedArray = collection.toArray();
+        int len = boxedArray.length;
+        byte[] array = new byte[len];
+        for (int i = 0; i < len; i++) {
+            array[i] = ((Number) boxedArray[i]).byteValue();
+        }
+        return array;
+    }
+
     private Asn1ReadResult tagReadPrepare(ParseContext parseContext) {
         if (this.options.isStripSequence() && parseContext.depth == 0) {
+            byte[] buffer = toByteArray(getTagBuffer(parseContext));
             return new Asn1ReadResult(
+                    buffer,
                     Asn1ReadResult.ReadType.BEGIN_SEQUENCE,
                     new Asn1SequenceResult(
                             parseContext.tagLength == 0,
@@ -371,7 +384,7 @@ public class Asn1StreamReader extends FilterInputStream {
         return null;
     }
 
-    private List<Asn1ReadResult> tagReadDone(ParseContext parseContext) throws IOException, InterruptedException {
+    private List<Asn1ReadResult> tagReadDone(ParseContext parseContext, ParseContext currentContext) throws IOException, InterruptedException {
         List<Asn1ReadResult> readResults = new ArrayList<>(2);
         parseContext.step = ParseContext.ParseStep.READ_TAG_BEGIN;
         if (this._checkEmitableData(parseContext) && !parseContext.tagIsEOC()) {
@@ -382,7 +395,7 @@ public class Asn1StreamReader extends FilterInputStream {
             ASN1InputStream asn1InputStream = new ASN1InputStream(new ByteArrayInputStream(buffer));
             ASN1Primitive primitive = asn1InputStream.readObject();
             asn1InputStream.close();
-            readResults.add(new Asn1ReadResult(Asn1ReadResult.ReadType.OBJECT, primitive));
+            readResults.add(new Asn1ReadResult(buffer, Asn1ReadResult.ReadType.OBJECT, primitive));
         }
 
         parseContextStack.removeLast();
@@ -393,16 +406,17 @@ public class Asn1StreamReader extends FilterInputStream {
                         parseContext.tagLength == 0,
                         parseContext.tagTotalReadLength
                 );
-                readResults.add(new Asn1ReadResult(Asn1ReadResult.ReadType.END_SEQUENCE, sequenceResult));
+                byte[] buffer = toByteArray(currentContext.tagBuffer);
+                readResults.add(new Asn1ReadResult(buffer, Asn1ReadResult.ReadType.END_SEQUENCE, sequenceResult));
             }
         }else{
             if(parseContext.tagIsEOC()) {
-                readResults.addAll(this.tagReadDone(parseContext.parent));
+                readResults.addAll(this.tagReadDone(parseContext.parent, parseContext));
             }
         }
 
         if(parseContext.depth == 1 && parseContext.parent.totalRemaining == 0) {
-            readResults.addAll(this.tagReadDone(parseContext.parent));
+            readResults.addAll(this.tagReadDone(parseContext.parent, null));
         }
 
         return readResults;

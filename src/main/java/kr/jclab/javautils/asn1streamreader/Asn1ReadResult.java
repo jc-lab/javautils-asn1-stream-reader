@@ -9,12 +9,18 @@ public class Asn1ReadResult {
         OBJECT
     }
 
+    private final byte[] rawBuffer;
     private final ReadType readType;
     private final Object object;
 
-    public Asn1ReadResult(ReadType readType, Object object) {
+    public Asn1ReadResult(byte[] rawBuffer, ReadType readType, Object object) {
+        this.rawBuffer = rawBuffer;
         this.readType = readType;
         this.object = object;
+    }
+
+    public byte[] getRawBuffer() {
+        return this.rawBuffer;
     }
 
     public ReadType getReadType() {
