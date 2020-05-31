@@ -16,6 +16,11 @@ public class ByteBufferReadBuffer implements ReadBuffer {
     }
 
     @Override
+    public boolean isNonBlocking() {
+        return true;
+    }
+
+    @Override
     public int available() {
         return backendBuffer.remaining();
     }

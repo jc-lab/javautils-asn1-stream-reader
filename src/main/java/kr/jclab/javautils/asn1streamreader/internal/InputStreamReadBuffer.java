@@ -20,6 +20,11 @@ public class InputStreamReadBuffer implements ReadBuffer {
     }
 
     @Override
+    public boolean isNonBlocking() {
+        return this.nonBlocking;
+    }
+
+    @Override
     public int available() throws IOException {
         return this.backendIn.available();
     }

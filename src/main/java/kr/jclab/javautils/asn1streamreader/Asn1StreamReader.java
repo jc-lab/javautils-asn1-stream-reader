@@ -26,6 +26,7 @@ public class Asn1StreamReader extends FilterInputStream {
     private LinkedBlockingQueue<Asn1ReadResult> queue = new LinkedBlockingQueue<>();
 
     private boolean eof = false;
+    private IOException lastException = null;
 
     private static Asn1ReaderOptions defaultOptions(Asn1ReaderOptions options) {
         if(options != null) {
@@ -59,6 +60,10 @@ public class Asn1StreamReader extends FilterInputStream {
                     while (readThreadRun.get()) {
                         try {
                             try {
+                                if (this.in.available() < 0) {
+                                    this.setEof();
+                                    break;
+                                }
                                 List<Asn1ReadResult> readResults = onData(readBuffer);
                                 for(Asn1ReadResult item : readResults) {
                                     options.getReadCallback().onData(item);
@@ -67,7 +72,7 @@ public class Asn1StreamReader extends FilterInputStream {
                                 if (e.getCause() instanceof InterruptedException) {
                                     throw (InterruptedException)e.getCause();
                                 }
-                                e.printStackTrace();
+                                lastException = e;
                             }
                         } catch (InterruptedException intException) {
                             // Nothing
@@ -108,6 +113,9 @@ public class Asn1StreamReader extends FilterInputStream {
         if (this.options.getReadCallback() != null) {
             throw new IOException("Not support on callback mode");
         }
+        if (lastException != null) {
+            throw lastException;
+        }
         if (this.readingUsingCallback) {
             return this.queue.poll(timeout, unit);
         }else{
@@ -116,9 +124,9 @@ public class Asn1StreamReader extends FilterInputStream {
             long sleepMs = (timeoutNs < 1000000) ? timeoutNs / 100000 : 100;
             long beginAt = System.nanoTime();
             while((result = this.readObject(true)) == null) {
-                Thread.sleep(sleepMs);
                 if ((System.nanoTime() - beginAt) >= timeoutNs)
                     break;
+                Thread.sleep(sleepMs);
             }
             return result;
         }
@@ -144,6 +152,9 @@ public class Asn1StreamReader extends FilterInputStream {
                 }
             } catch (InterruptedException e) {
                 throw new IOException(e);
+            }
+            if (this.available() < 0) {
+                this.setEof();
             }
             return readResults.isEmpty() ? null : readResults.get(0);
         }
@@ -220,7 +231,7 @@ public class Asn1StreamReader extends FilterInputStream {
 
     private List<Asn1ReadResult> onData(ReadBuffer readBuffer) throws IOException {
         List<Asn1ReadResult> readResults = new ArrayList<>(2);
-        while (readBuffer.available() > 0 && readResults.isEmpty()) {
+        while ((!readBuffer.isNonBlocking()) || (readBuffer.available() > 0 && readResults.isEmpty())) {
             if (this.parseContextStack.size() == 0) {
                 this.parseContextStack.addLast(new ParseContext(null));
             }
@@ -230,7 +241,7 @@ public class Asn1StreamReader extends FilterInputStream {
                 readBuffer.setAfterReadHandler(parseContext::decrementTotalRemaining);
                 switch (parseContext.step) {
                     case READ_TAG_BEGIN:
-                        if (readBuffer.available(1)) {
+                        if ((!readBuffer.isNonBlocking()) || readBuffer.available(1)) {
                             byte buf = readBuffer.readByte();
                             parseContext.tagBuffer.clear();
                             getTagBuffer(parseContext).add(buf);
@@ -250,7 +261,7 @@ public class Asn1StreamReader extends FilterInputStream {
                         }
 
                     case READ_TAG_LONG:
-                        if (readBuffer.available(1)) {
+                        if ((!readBuffer.isNonBlocking()) || readBuffer.available(1)) {
                             byte buf;
                             do {
                                 buf = readBuffer.readByte();
@@ -268,7 +279,7 @@ public class Asn1StreamReader extends FilterInputStream {
                         }
 
                     case READ_TAG_LENGTH:
-                        if (readBuffer.available(1)) {
+                        if ((!readBuffer.isNonBlocking()) || readBuffer.available(1)) {
                             byte buf = readBuffer.readByte();
                             int len = buf & 0x7F;
 
@@ -309,20 +320,18 @@ public class Asn1StreamReader extends FilterInputStream {
                         }
 
                     case READ_TAG_LENGTH_LONG:
-                        if (readBuffer.available() > 0) {
-                            while ((readBuffer.available() > 0) && (parseContext.tagLenRemaining > 0)) {
-                                byte buf = readBuffer.readByte();
-                                getTagBuffer(parseContext).add(buf);
-                                parseContext.tagTempInt10 = (parseContext.tagTempInt10 << 8) | (buf & 0xFF);
-                                parseContext.tagLenRemaining--;
-                            }
-                            if (parseContext.tagLenRemaining == 0) {
-                                parseContext.tagLength = parseContext.tagTempInt10;
-                                parseContext.tagTotalLength = parseContext.tagTotalReadLength + parseContext.tagLength;
-                                parseContext.totalRemaining = parseContext.tagLength;
-                                parseContext.step = ParseContext.ParseStep.READ_TAG_CONTENT_FIXED_LENGTH;
-                                addIfNotNull(readResults, this.tagReadPrepare(parseContext));
-                            }
+                        while ((!readBuffer.isNonBlocking()) || ((readBuffer.available() > 0) && (parseContext.tagLenRemaining > 0))) {
+                            byte buf = readBuffer.readByte();
+                            getTagBuffer(parseContext).add(buf);
+                            parseContext.tagTempInt10 = (parseContext.tagTempInt10 << 8) | (buf & 0xFF);
+                            parseContext.tagLenRemaining--;
+                        }
+                        if (parseContext.tagLenRemaining == 0) {
+                            parseContext.tagLength = parseContext.tagTempInt10;
+                            parseContext.tagTotalLength = parseContext.tagTotalReadLength + parseContext.tagLength;
+                            parseContext.totalRemaining = parseContext.tagLength;
+                            parseContext.step = ParseContext.ParseStep.READ_TAG_CONTENT_FIXED_LENGTH;
+                            addIfNotNull(readResults, this.tagReadPrepare(parseContext));
                         }
                         break;
 
@@ -337,13 +346,22 @@ public class Asn1StreamReader extends FilterInputStream {
                         break;
 
                     case READ_TAG_CONTENT_FIXED_LENGTH:
-                        if (readBuffer.available() > 0) {
+                        if (!readBuffer.isNonBlocking()) {
                             int remainTagContent = parseContext.tagLength - parseContext.tagWrittenLength;
-                            int avail = readBuffer.available() < remainTagContent ? readBuffer.available() : remainTagContent;
-                            readBuffer.readBufferTo(getTagBuffer(parseContext), avail);
-                            parseContext.tagWrittenLength += avail;
+                            readBuffer.readBufferTo(getTagBuffer(parseContext), remainTagContent);
+                            parseContext.tagWrittenLength += remainTagContent;
                             if (parseContext.tagWrittenLength == parseContext.tagLength) {
                                 readResults.addAll(this.tagReadDone(parseContext, null));
+                            }
+                        } else {
+                            if (readBuffer.available() > 0) {
+                                int remainTagContent = parseContext.tagLength - parseContext.tagWrittenLength;
+                                int avail = Math.min(readBuffer.available(), remainTagContent);
+                                readBuffer.readBufferTo(getTagBuffer(parseContext), avail);
+                                parseContext.tagWrittenLength += avail;
+                                if (parseContext.tagWrittenLength == parseContext.tagLength) {
+                                    readResults.addAll(this.tagReadDone(parseContext, null));
+                                }
                             }
                         }
                         break;
@@ -406,7 +424,7 @@ public class Asn1StreamReader extends FilterInputStream {
                         parseContext.tagLength == 0,
                         parseContext.tagTotalReadLength
                 );
-                byte[] buffer = toByteArray(currentContext.tagBuffer);
+                byte[] buffer = (currentContext != null) ? toByteArray(currentContext.tagBuffer) : new byte[0];
                 readResults.add(new Asn1ReadResult(buffer, Asn1ReadResult.ReadType.END_SEQUENCE, sequenceResult));
             }
         }else{
